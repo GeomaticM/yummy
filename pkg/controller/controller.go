@@ -5,11 +5,6 @@ import (
 	"github.com/golang/glog"
 	"github.com/silenceshell/yummy/pkg/lvm"
 	"github.com/silenceshell/yummy/pkg/utils"
-	"os"
-
-	//"k8s.io/apimachinery/pkg/util/rand"
-
-	//"github.com/silenceshell/yummy/agent"
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/util/runtime"
@@ -17,6 +12,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -76,68 +73,85 @@ const (
 )
 
 func (c *Controller) handleAddAndUpdate(pvc *v1.PersistentVolumeClaim) error {
-	//annotations := pvc.GetAnnotations()
-	//nodeName, ok := annotations[AnnotationKey]
-	//if !ok {
-	//	glog.Infof("pvc %s has no yummy annotation, wait for master to set", pvc.Name)
-	//	return nil
-	//}
-	//
-	//// if pvc is not scheduled to this node, agent will just ignore it.
-	//if nodeName != c.nodeName {
-	//	return nil
-	//}
+	var mountPoint string
 	if !c.isMyPvc(pvc) {
 		return nil
 	}
 
 	// otherwise agent will create lv on this node
-	lvName := pvc.Namespace + "-" + pvc.Name //+ "-" + rand.String(8)
+	lvName := pvc.Namespace + "-" + pvc.Name
 
-	isExist, err := lvm.IsLvExist(c.volumeGroup, lvName)
+	isExist := lvm.IsLvExist(c.volumeGroup, lvName)
+	// if lvm exist, it must has been mounted.
+	if isExist {
+		return nil
+	}
+
+	// lv not exist, create lv now
+	request, found := pvc.Spec.Resources.Requests[v1.ResourceStorage]
+	if !found {
+		glog.Error("storage resource not specified")
+		return fmt.Errorf("storage resource not specified")
+	}
+	size, ret := request.AsInt64()
+	if !ret {
+		glog.Error("storage resource request to int64 failed")
+		return fmt.Errorf("storage resource request to int64 failed")
+	}
+
+	/*
+		get info from /etc/mke2fs.conf
+		[defaults]
+		blocksize = 4096
+		inode_size = 256
+		inode_ratio = 16384
+	*/
+	//inodeCount := size / 16384
+	//inodeSize := inodeCount * 256
+	//size += inodeSize
+
+	// reserved block count / block count = 0.95, and plus 4096 in case.
+	// block count * 4096 is a little smaller than df() info, so it will met the pvc requirement.
+	// totalSize := size * 100 / 95 + 4096
+	size = size * 100 / 95
+
+	glog.Infof("pvc size %v %v size %v", pvc.Spec.Size(), pvc.Size(), size)
+	lv, err := lvm.CreateLv(c.volumeGroup, lvName, size)
 	if err != nil {
 		return err
-	}
-	// lv not exist, create lv now
-	if !isExist {
-		request, found := pvc.Spec.Resources.Requests[v1.ResourceStorage]
-		if !found {
-			glog.Error("storage resource not specified")
-			return fmt.Errorf("storage resource not specified")
-		}
-		size, ret := request.AsInt64()
-		if !ret {
-			glog.Error("storage resource request to int64 failed")
-			return fmt.Errorf("storage resource request to int64 failed")
-		}
-		glog.Infof("pvc size %v %v %v", pvc.Spec.Size(), pvc.Size(), size)
-		if err := lvm.CreateLv(c.volumeGroup, lvName, size); err != nil {
-			return err
-		}
 	}
 
 	//mkfs.ext4 /dev/volume-group1/lv1
 	lvFullName := fmt.Sprintf("/dev/%s/%s", c.volumeGroup, lvName)
 	err = utils.Run("mkfs.ext4", lvFullName)
 	if err != nil {
-		return err
+		goto failed
 	}
 
 	//mkdir /lvm-mount
-	//todo: check the mount point dir is exist or not. if true, emm..
-	mountPoint := fmt.Sprintf("%s/%s", c.mountDir, lvName)
-	err = os.Mkdir(mountPoint, os.ModeDir)
-	if err != nil {
-		return err
+	mountPoint = fmt.Sprintf("%s/%s", c.mountDir, lvName)
+	_, err = os.Stat(mountPoint)
+	if os.IsNotExist(err) {
+		glog.Infof("mount point not exist, create now")
+		err = os.Mkdir(mountPoint, os.ModeDir)
+		if err != nil {
+			goto failed
+		}
 	}
 
 	//mount /dev/volume-group1/lv1 /lvm-mount/
 	err = utils.Run("mount", lvFullName, mountPoint)
 	if err != nil {
-		return err
+		goto failed
 	}
 
 	return nil
+failed:
+	e := lv.Remove()
+	if e != nil {
+		glog.Error("lv remove failed", e)
+	}
+	return err
 }
 
 func (c *Controller) isMyPvc(pvc *v1.PersistentVolumeClaim) bool {
@@ -156,22 +170,32 @@ func (c *Controller) isMyPvc(pvc *v1.PersistentVolumeClaim) bool {
 	return true
 }
 
-func (c *Controller) handleDelete(pvc *v1.PersistentVolumeClaim) error {
-	if !c.isMyPvc(pvc) {
-		return nil
-	}
+//func (c *Controller) handleDelete(pvc *v1.PersistentVolumeClaim) error {
+func (c *Controller) handleDelete(pvc string) error {
+	//pvc in fmt {namespace}/{pvc name}
 
-	// otherwise agent will create lv on this node
-	lvName := pvc.Namespace + "-" + pvc.Name //+ "-" + rand.String(8)
-	isExist, err := lvm.IsLvExist(c.volumeGroup, lvName)
-	if err != nil {
-		return err
-	}
-	if !isExist {
-		return fmt.Errorf("lv %s not found in gv %s", lvName, c.volumeGroup)
-	}
+	//umount and rmdir
+	sp := strings.Split(pvc, "/")
+	lvName := sp[0] + "-" + sp[1]
+	glog.Infof("delete lv %s", lvName)
 
+	mountPoint := fmt.Sprintf("%s/%s", c.mountDir, lvName)
+	_, err := os.Stat(mountPoint)
+	if err == nil {
+		glog.Infof("mount point exist, umount and rm this dir")
+		err = utils.Run("umount", mountPoint)
+		if err != nil {
+			glog.Error("umount failed")
+			return err
+		}
 
+		err = os.Remove(mountPoint)
+		if err != nil {
+			return err
+		}
+
+		lvm.DeleteLv(c.volumeGroup, lvName)
+	}
 
 	return nil
 }
@@ -190,6 +214,9 @@ func (c *Controller) handle(message Message) error {
 	if !exists {
 		// Below we will warm up our cache with a Pvc, so that we will see a delete for one pvc
 		glog.Infof("Pvc %s does not exist anymore\n", key)
+		if message.messageType == MessageDelete {
+			err = c.handleDelete(key)
+		}
 	} else {
 		// Note that you also have to check the uid if you have a local controlled resource, which
 		// is dependent on the actual instance, to detect that a Pvc was recreated with the same name
@@ -205,9 +232,9 @@ func (c *Controller) handle(message Message) error {
 			err = c.handleAddAndUpdate(pvc)
 		case MessageDelete:
 			glog.Infof("PVC Delete, %v", pvc)
+			//err = c.handleDelete(pvc)
 		default:
 			glog.Error("Invalid Message Type")
-			err = c.handleDelete(pvc)
 		}
 	}
 	return err

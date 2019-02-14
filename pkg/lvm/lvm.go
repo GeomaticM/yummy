@@ -6,7 +6,7 @@ import (
 	"github.com/nak3/go-lvm"
 )
 
-func CreateLv(vg string, lvName string, size int64) error {
+func CreateLv(vg string, lvName string, size int64) (*lvm.LvObject, error) {
 	vgo := &lvm.VgObject{}
 
 	glog.Infof("create lv from vg %s, name %s size %d", vg, lvName, size)
@@ -19,48 +19,51 @@ func CreateLv(vg string, lvName string, size int64) error {
 	l, err := vgo.CreateLvLinear(lvName, size)
 	if err != nil {
 		glog.Infof("error: %v", err)
-		return err
+		return nil, err
 	}
 
 	glog.Infof("new lv uuid %s", l.GetUuid())
-	return nil
+	return l, nil
 }
 
-func DeleteLv() {
-//lvremove /dev/volume-group1/default-myclaim2
-
-}
-
-func IsLvExist(vg string, lvName string) (bool, error) {
+func DeleteLv(vg string, lvName string) {
 	vgo := &lvm.VgObject{}
 
-	glog.Infof("check lv exist %s vg %s", vg, lvName)
+	glog.Infof("delete lv %s from vg %s", lvName, vg)
 
-	// Open VG in write mode
-	//todo: consider to open vg once when agent start
+	// Open VG in read mode
+	vgo.Vgt = lvm.VgOpen(vg, "w")
+	defer vgo.Close()
+
+	lv, err := vgo.LvFromName(lvName)
+	if err != nil {
+		glog.Warningf("get lv %s failed, skip deleting", lvName)
+		return
+	}
+
+	err = lv.Remove()
+	if err != nil {
+		glog.Warning("lv delete failed", err)
+	}
+	glog.Infof("lv delete success")
+}
+
+func IsLvExist(vg string, lvName string) bool {
+	vgo := &lvm.VgObject{}
+
+	glog.Infof("check lv %s exist in vg %s", lvName, vg)
+
+	// Open VG in read mode
 	vgo.Vgt = lvm.VgOpen(vg, "r")
 	defer vgo.Close()
 
-	//lv, err := vgo.LvFromName(lvName)
-	//if err != nil {
-	//	glog.Warning("get lv failed", err)
-	//	return false, err
-	//}
-	//if !lv.IsActive() {
-	//	glog.Warning("lv not active")
-	//	return false, nil
-	//}
-	//
-	//glog.Infof("lv is exist and active %s", lv.GetUuid())
-
-	lvs := vgo.ListLVs()
-	for _, lv := range lvs {
-		if lv == lvName {
-			return true, nil
-		}
+	lv, err := vgo.LvFromName(lvName)
+	if err == nil && lv.IsActive() {
+		glog.Info("lv exist and is active")
+		return true
 	}
 
-	return false, nil
+	return false
 }
 
 func ListVgNames() {
