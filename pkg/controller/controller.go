@@ -179,6 +179,8 @@ func (c *Controller) handleDelete(pvc string) error {
 	lvName := sp[0] + "-" + sp[1]
 	glog.Infof("delete lv %s", lvName)
 
+	//requeue after
+
 	mountPoint := fmt.Sprintf("%s/%s", c.mountDir, lvName)
 	_, err := os.Stat(mountPoint)
 	if err == nil {
@@ -189,10 +191,10 @@ func (c *Controller) handleDelete(pvc string) error {
 			return err
 		}
 
-		err = os.Remove(mountPoint)
-		if err != nil {
-			return err
-		}
+		//err = os.Remove(mountPoint)
+		//if err != nil {
+		//	return err
+		//}
 
 		lvm.DeleteLv(c.volumeGroup, lvName)
 	}
