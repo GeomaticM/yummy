@@ -41,7 +41,7 @@ agentConfigMap:
 
 `volumeGroup` is the vg of this node; `mountDir` is the dir that new lv will be mounted.
 
-2. run agent
+2 run agent
 
 ```bash
 #!/bin/bash
