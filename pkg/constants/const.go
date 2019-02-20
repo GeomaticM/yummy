@@ -6,9 +6,8 @@ package constants
 // yummy.free.pe=30037 / 117.33 GiB
 
 const (
-	AnnotationKey = "yummyNodeName"
-	AnnotationVgSize = "yummy.vg.size"
-	AnnotationPeSize = "yummy.pe.size"  	//MiB
-	AnnotationAllocPe = "yummy.alloc.pe"
-	AnnotationFreePe = "yummy.free.pe"		//count
+	AnnotationNodeName      = "yummy.node.name"
+	AnnotationVgSize        = "yummy.vg.size"
+	AnnotationVgFreeSize    = "yummy.vg.free.size" //B
+	StorageClassLocalVolume = "local-volume"
 )

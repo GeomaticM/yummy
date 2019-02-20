@@ -5,16 +5,15 @@ import "C"
 import (
 	"flag"
 	"github.com/golang/glog"
+	"github.com/silenceshell/yummy/pkg/constants"
 	"github.com/silenceshell/yummy/pkg/utils"
+	"strconv"
 
 	//"github.com/prometheus/client_golang/prometheus"
 	//"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/silenceshell/yummy/pkg/agent/common"
 	"github.com/silenceshell/yummy/pkg/agent/controller"
 	"github.com/silenceshell/yummy/pkg/agent/lvm"
-	"k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
 	"math/rand"
 	"os"
 	"time"
@@ -57,7 +56,7 @@ func main() {
 	}
 
 	client := utils.SetupClient()
-	node := getNode(client, nodeName)
+	node := utils.GetNode(client, nodeName)
 
 	glog.Info("node name is ", node.Name)
 
@@ -74,6 +73,17 @@ func main() {
 	// yummy.free.pe=30037 / 117.33 GiB
 	// this annotation will be updated every time when pvc is created
 
+	vgSize, vgFree, err := lvm.GetVgInfo(vg)
+	if err != nil {
+		panic(err)
+	}
+	node.Annotations[constants.AnnotationVgSize] = strconv.FormatUint(vgSize, 10)
+	node.Annotations[constants.AnnotationVgFreeSize] = strconv.FormatUint(vgFree, 10)
+
+	_, err = client.CoreV1().Nodes().Update(node)
+	if err != nil {
+		panic(err)
+	}
 
 	mountDir := yummyAgentConfig.AgentConfigMap["agentConfigMap"].MountDir
 	stat, err := os.Stat(mountDir)
@@ -96,12 +106,4 @@ func main() {
 	//http.Handle(optMetricsPath, promhttp.Handler())
 
 	controller.StartController(client, nodeName, vg, mountDir)
-}
-
-func getNode(client *kubernetes.Clientset, name string) *v1.Node {
-	node, err := client.CoreV1().Nodes().Get(name, metav1.GetOptions{})
-	if err != nil {
-		glog.Fatalf("Could not get node information: %v", err)
-	}
-	return node
 }

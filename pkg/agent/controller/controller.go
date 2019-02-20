@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/golang/glog"
 	"github.com/silenceshell/yummy/pkg/agent/lvm"
+	"github.com/silenceshell/yummy/pkg/constants"
 	"github.com/silenceshell/yummy/pkg/utils"
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/fields"
@@ -13,6 +14,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -32,13 +34,14 @@ type Controller struct {
 	indexer     cache.Indexer
 	queue       workqueue.RateLimitingInterface
 	informer    cache.Controller
+	clientset   *kubernetes.Clientset
 	nodeName    string
 	volumeGroup string
 	mountDir    string
 }
 
 func NewController(queue workqueue.RateLimitingInterface, indexer cache.Indexer,
-	informer cache.Controller, nodeName, volumeGroup, mountDir string) *Controller {
+	informer cache.Controller, nodeName, volumeGroup, mountDir string, clientset *kubernetes.Clientset) *Controller {
 	return &Controller{
 		informer:    informer,
 		indexer:     indexer,
@@ -46,6 +49,7 @@ func NewController(queue workqueue.RateLimitingInterface, indexer cache.Indexer,
 		nodeName:    nodeName,
 		volumeGroup: volumeGroup,
 		mountDir:    mountDir,
+		clientset:   clientset,
 	}
 }
 
@@ -68,12 +72,11 @@ func (c *Controller) processNextItem() bool {
 	return true
 }
 
-const (
-	AnnotationKey = "yummyNodeName"
-)
-
 func (c *Controller) handleAddAndUpdate(pvc *v1.PersistentVolumeClaim) error {
 	var mountPoint string
+	var node *v1.Node
+	var vgSize, vgFree uint64
+
 	if !c.isMyPvc(pvc) {
 		return nil
 	}
@@ -145,7 +148,19 @@ func (c *Controller) handleAddAndUpdate(pvc *v1.PersistentVolumeClaim) error {
 		goto failed
 	}
 
-	//todo: update node annotation
+	// update node annotation
+	vgSize, vgFree, err = lvm.GetVgInfo(c.volumeGroup)
+	if err != nil {
+		goto failed
+	}
+	node = utils.GetNode(c.clientset, c.nodeName)
+	node.Annotations[constants.AnnotationVgSize] = strconv.FormatUint(vgSize, 10)
+	node.Annotations[constants.AnnotationVgFreeSize] = strconv.FormatUint(vgFree, 10)
+
+	_, err = c.clientset.CoreV1().Nodes().Update(node)
+	if err != nil {
+		goto failed
+	}
 
 	return nil
 failed:
@@ -157,8 +172,12 @@ failed:
 }
 
 func (c *Controller) isMyPvc(pvc *v1.PersistentVolumeClaim) bool {
+	if pvc.Spec.StorageClassName != nil && *pvc.Spec.StorageClassName != constants.StorageClassLocalVolume {
+		return false
+	}
+
 	annotations := pvc.GetAnnotations()
-	nodeName, ok := annotations[AnnotationKey]
+	nodeName, ok := annotations[constants.AnnotationNodeName]
 	if !ok {
 		glog.Infof("pvc %s has no yummy annotation, wait for master to set", pvc.Name)
 		return false
@@ -333,7 +352,7 @@ func StartController(clientset *kubernetes.Clientset, nodeName, volumeGroup, mou
 		},
 	}, cache.Indexers{})
 
-	controller := NewController(queue, indexer, informer, nodeName, volumeGroup, mountDir)
+	controller := NewController(queue, indexer, informer, nodeName, volumeGroup, mountDir, clientset)
 
 	// Now let's start the controller
 	stop := make(chan struct{})

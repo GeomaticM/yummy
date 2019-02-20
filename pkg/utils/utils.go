@@ -2,6 +2,8 @@ package utils
 
 import (
 	"github.com/golang/glog"
+	"k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -54,4 +56,12 @@ func SetupClient() *kubernetes.Clientset {
 		glog.Fatalf("Error creating clientset: %v\n", err)
 	}
 	return clientset
+}
+
+func GetNode(client *kubernetes.Clientset, name string) *v1.Node {
+	node, err := client.CoreV1().Nodes().Get(name, metav1.GetOptions{})
+	if err != nil {
+		glog.Fatalf("Could not get node information: %v", err)
+	}
+	return node
 }

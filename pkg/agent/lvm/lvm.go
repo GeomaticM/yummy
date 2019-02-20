@@ -92,6 +92,7 @@ var vgSize uint64
 var vgFree uint64
 
 func IsVgExistAndAvailable(vg string) (bool, error) {
+	//todo: get vg by name
 	vglist := lvm.ListVgNames()
 
 	// Create a VG object
@@ -113,5 +114,29 @@ func IsVgExistAndAvailable(vg string) (bool, error) {
 
 	fmt.Printf("no VG that has free space found\n")
 	return false, fmt.Errorf("VG %s is not avaliable", vg)
+}
 
+func GetVgInfo(vg string) (vgSize, vgFree uint64, err error) {
+	//todo: get vg by name
+	vglist := lvm.ListVgNames()
+
+	// Create a VG object
+	vgo := &lvm.VgObject{}
+	for i := 0; i < len(vglist); i++ {
+		if vglist[i] == vg {
+			vgo.Vgt = lvm.VgOpen(vglist[i], "r")
+			vgSize = uint64(vgo.GetSize())
+			vgFree = uint64(vgo.GetFreeSize())
+			vgo.Close()
+			if vgFree > 0 && vgSize > 0 {
+				fmt.Printf("vg size %v and free %v\r\n", vgSize, vgFree)
+				return vgSize, vgFree, nil
+			} else {
+				return 0, 0, fmt.Errorf("vg size incorrect, size %v free %v", vgSize, vgFree)
+			}
+		}
+	}
+
+	fmt.Printf("no VG that has free space found\n")
+	return 0, 0, fmt.Errorf("VG %s is not avaliable", vg)
 }

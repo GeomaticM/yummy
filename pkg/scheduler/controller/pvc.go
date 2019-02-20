@@ -5,13 +5,13 @@ import (
 	"github.com/golang/glog"
 	"github.com/silenceshell/yummy/pkg/constants"
 	"k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"strconv"
 	"time"
 )
@@ -28,19 +28,19 @@ const (
 )
 
 type PvcController struct {
-	indexer     cache.Indexer
-	queue       workqueue.RateLimitingInterface
-	informer    cache.Controller
-	clientset   *kubernetes.Clientset
+	indexer   cache.Indexer
+	queue     workqueue.RateLimitingInterface
+	informer  cache.Controller
+	clientset *kubernetes.Clientset
 }
 
 func NewController(queue workqueue.RateLimitingInterface, indexer cache.Indexer,
 	informer cache.Controller, clientset *kubernetes.Clientset) *PvcController {
 	return &PvcController{
-		informer:    informer,
-		indexer:     indexer,
-		queue:       queue,
-		clientset:   clientset,
+		informer:  informer,
+		indexer:   indexer,
+		queue:     queue,
+		clientset: clientset,
 	}
 }
 
@@ -63,11 +63,25 @@ func (c *PvcController) processNextItem() bool {
 	return true
 }
 
-const (
-	AnnotationKey = "yummyNodeName"
-)
+func (c *PvcController) isMyPvc(pvc *v1.PersistentVolumeClaim) bool {
+	if pvc.Spec.StorageClassName != nil && *pvc.Spec.StorageClassName != constants.StorageClassLocalVolume {
+		return false
+	}
+
+	annotations := pvc.GetAnnotations()
+	if _, ok := annotations[constants.AnnotationNodeName]; ok {
+		glog.Infof("pvc %s has set yummy annotation, ignore", pvc.Name)
+		return false
+	}
+
+	return true
+}
 
 func (c *PvcController) handleAddAndUpdate(pvc *v1.PersistentVolumeClaim) error {
+	if !c.isMyPvc(pvc) {
+		return nil
+	}
+
 	request, found := pvc.Spec.Resources.Requests[v1.ResourceStorage]
 	if !found {
 		glog.Error("storage resource not specified")
@@ -84,15 +98,24 @@ func (c *PvcController) handleAddAndUpdate(pvc *v1.PersistentVolumeClaim) error 
 	glog.Infof("pvc size %v %v size %v", pvc.Spec.Size(), pvc.Size(), size)
 
 	// get the fit node.
-	node, err := c.schedule(pvc, size)
+	nodeName, err := c.schedule(pvc, size)
 	if err != nil {
-		glog.Error(err)
+		glog.Error("scheduler failed, ", err)
 		return err
 	}
 
-	//todo: update pvc annotation
-	pvc.Annotations[AnnotationKey] = node
+	//update pvc annotation
+	if pvc.Annotations == nil {
+		pvc.Annotations = make(map[string]string)
+	}
+	pvc.Annotations[constants.AnnotationNodeName] = nodeName
+	_, err = c.clientset.CoreV1().PersistentVolumeClaims(pvc.Namespace).Update(pvc)
+	if err != nil {
+		glog.Error("update pvc failed, ", err)
+		return err
+	}
 
+	glog.Infof("set annotation for pvc %s in ns %s, node %s", pvc.Name, pvc.Namespace, nodeName)
 	return nil
 }
 
@@ -102,34 +125,42 @@ func (c *PvcController) schedule(pvc *v1.PersistentVolumeClaim, size int64) (nod
 		return "", err
 	}
 
-	//todo: just find a node that could fit the pvc. Later we will find the best fit node
-	//var fitNode string
-	//var score int
-	var peSize int
-	var freePe int
+	var fitNode string
+	var score uint64
+
+	var vgSize uint64
+	var vgFreeSize uint64
 
 	for _, node := range nodes.Items {
-		if a, ok := node.Annotations[constants.AnnotationPeSize]; !ok {
+		if a, ok := node.Annotations[constants.AnnotationVgSize]; !ok {
 			continue
 		} else {
-			peSize, err = strconv.Atoi(a)
+			vgSize, err = strconv.ParseUint(a, 10, 64)
 			if err != nil {
 				return "", err
 			}
 		}
-		if a, ok := node.Annotations[constants.AnnotationFreePe]; ok {
+		if a, ok := node.Annotations[constants.AnnotationVgFreeSize]; !ok {
 			continue
 		} else {
-			freePe, err = strconv.Atoi(a)
+			vgFreeSize, err = strconv.ParseUint(a, 10, 64)
 			if err != nil {
 				return "", err
 			}
 		}
-		if int64(peSize * freePe * 1024) > size {
-			return node.Name, nil
+
+		if vgFreeSize > uint64(size) {
+			s := (vgFreeSize * 100) / vgSize
+			if s > score {
+				score = s
+				fitNode = node.Name
+			}
 		}
 	}
 
+	if score != 0 {
+		return fitNode, nil
+	}
 	return "", fmt.Errorf("no node fit for this pvc")
 }
 
@@ -155,13 +186,13 @@ func (c *PvcController) handle(message Message) error {
 
 		switch message.messageType {
 		case MessageAdd:
-			glog.Infof("PVC Create, %v", pvc)
+			glog.Infof("PVC Create %s", pvc.Name)
 			err = c.handleAddAndUpdate(pvc)
 		case MessageUpdate:
-			glog.Infof("PVC Update, %v", pvc)
+			glog.Infof("PVC Update %s", pvc.Name)
 			//err = c.handleAddAndUpdate(pvc)
 		case MessageDelete:
-			glog.Infof("PVC Delete, %v", pvc)
+			glog.Infof("PVC Delete, %s", pvc.Name)
 		default:
 			glog.Error("Invalid Message Type")
 		}

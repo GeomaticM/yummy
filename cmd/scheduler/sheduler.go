@@ -1,12 +1,12 @@
 package main
 
 import (
+	"flag"
+	"github.com/golang/glog"
 	"github.com/silenceshell/yummy/pkg/scheduler/controller"
 	"github.com/silenceshell/yummy/pkg/utils"
-	"time"
-	"flag"
 	"math/rand"
-	"github.com/golang/glog"
+	"time"
 )
 
 func main() {
