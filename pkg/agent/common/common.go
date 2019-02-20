@@ -5,24 +5,13 @@ import (
 	"github.com/ghodss/yaml"
 	"github.com/golang/glog"
 	"io/ioutil"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
-	"os"
 	"path"
 	"strings"
 )
 
 const (
 	YummyAgentConfigPath = "/etc/yummy/config/"
-	KubeConfigEnv        = "KUBECONFIG"
 )
-
-// BuildConfigFromFlags being defined to enable mocking during unit testing
-var BuildConfigFromFlags = clientcmd.BuildConfigFromFlags
-
-// InClusterConfig being defined to enable mocking during unit testing
-var InClusterConfig = rest.InClusterConfig
 
 type AgentConfig struct {
 	// The volume group
@@ -90,32 +79,4 @@ func LoadYummyAgentConfigs(configPath string, yummyAgentConfig *YummyAgentConfig
 		}
 	}
 	return ConfigMapDataToVolumeConfig(data, yummyAgentConfig)
-}
-
-// SetupClient created client using either in-cluster configuration or if KUBECONFIG environment variable is specified then using that config.
-func SetupClient() *kubernetes.Clientset {
-	var config *rest.Config
-	var err error
-
-	kubeconfigFile := os.Getenv(KubeConfigEnv)
-	if kubeconfigFile != "" {
-		config, err = BuildConfigFromFlags("", kubeconfigFile)
-		if err != nil {
-			glog.Fatalf("Error creating config from %s specified file: %s %v\n", KubeConfigEnv,
-				kubeconfigFile, err)
-		}
-		glog.Infof("Creating client using kubeconfig file %s", kubeconfigFile)
-	} else {
-		config, err = InClusterConfig()
-		if err != nil {
-			glog.Fatalf("Error creating InCluster config: %v\n", err)
-		}
-		glog.Infof("Creating client using in-cluster config")
-	}
-
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		glog.Fatalf("Error creating clientset: %v\n", err)
-	}
-	return clientset
 }

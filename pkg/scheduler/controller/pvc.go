@@ -3,8 +3,7 @@ package controller
 import (
 	"fmt"
 	"github.com/golang/glog"
-	"github.com/silenceshell/yummy/pkg/lvm"
-	"github.com/silenceshell/yummy/pkg/utils"
+	"github.com/silenceshell/yummy/pkg/constants"
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/util/runtime"
@@ -12,8 +11,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
-	"os"
-	"strings"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"strconv"
 	"time"
 )
 
@@ -28,28 +27,24 @@ const (
 	MessageDelete = "Delete"
 )
 
-type Controller struct {
+type PvcController struct {
 	indexer     cache.Indexer
 	queue       workqueue.RateLimitingInterface
 	informer    cache.Controller
-	nodeName    string
-	volumeGroup string
-	mountDir    string
+	clientset   *kubernetes.Clientset
 }
 
 func NewController(queue workqueue.RateLimitingInterface, indexer cache.Indexer,
-	informer cache.Controller, nodeName, volumeGroup, mountDir string) *Controller {
-	return &Controller{
+	informer cache.Controller, clientset *kubernetes.Clientset) *PvcController {
+	return &PvcController{
 		informer:    informer,
 		indexer:     indexer,
 		queue:       queue,
-		nodeName:    nodeName,
-		volumeGroup: volumeGroup,
-		mountDir:    mountDir,
+		clientset:   clientset,
 	}
 }
 
-func (c *Controller) processNextItem() bool {
+func (c *PvcController) processNextItem() bool {
 	// Wait until there is a new item in the working queue
 	//key, quit := c.queue.Get()
 	message, quit := c.queue.Get()
@@ -72,22 +67,7 @@ const (
 	AnnotationKey = "yummyNodeName"
 )
 
-func (c *Controller) handleAddAndUpdate(pvc *v1.PersistentVolumeClaim) error {
-	var mountPoint string
-	if !c.isMyPvc(pvc) {
-		return nil
-	}
-
-	// otherwise agent will create lv on this node
-	lvName := pvc.Namespace + "-" + pvc.Name
-
-	isExist := lvm.IsLvExist(c.volumeGroup, lvName)
-	// if lvm exist, it must has been mounted.
-	if isExist {
-		return nil
-	}
-
-	// lv not exist, create lv now
+func (c *PvcController) handleAddAndUpdate(pvc *v1.PersistentVolumeClaim) error {
 	request, found := pvc.Spec.Resources.Requests[v1.ResourceStorage]
 	if !found {
 		glog.Error("storage resource not specified")
@@ -99,113 +79,64 @@ func (c *Controller) handleAddAndUpdate(pvc *v1.PersistentVolumeClaim) error {
 		return fmt.Errorf("storage resource request to int64 failed")
 	}
 
-	/*
-		get info from /etc/mke2fs.conf
-		[defaults]
-		blocksize = 4096
-		inode_size = 256
-		inode_ratio = 16384
-	*/
-	//inodeCount := size / 16384
-	//inodeSize := inodeCount * 256
-	//size += inodeSize
-
-	// reserved block count / block count = 0.95, and plus 4096 in case.
-	// block count * 4096 is a little smaller than df() info, so it will met the pvc requirement.
-	// totalSize := size * 100 / 95 + 4096
+	//todo: warp in a func
 	size = size * 100 / 95
-
 	glog.Infof("pvc size %v %v size %v", pvc.Spec.Size(), pvc.Size(), size)
-	lv, err := lvm.CreateLv(c.volumeGroup, lvName, size)
+
+	// get the fit node.
+	node, err := c.schedule(pvc, size)
 	if err != nil {
+		glog.Error(err)
 		return err
 	}
 
-	//mkfs.ext4 /dev/volume-group1/lv1
-	lvFullName := fmt.Sprintf("/dev/%s/%s", c.volumeGroup, lvName)
-	err = utils.Run("mkfs.ext4", lvFullName)
+	//todo: update pvc annotation
+	pvc.Annotations[AnnotationKey] = node
+
+	return nil
+}
+
+func (c *PvcController) schedule(pvc *v1.PersistentVolumeClaim, size int64) (node string, err error) {
+	nodes, err := c.clientset.CoreV1().Nodes().List(metav1.ListOptions{})
 	if err != nil {
-		goto failed
+		return "", err
 	}
 
-	//mkdir /lvm-mount
-	mountPoint = fmt.Sprintf("%s/%s", c.mountDir, lvName)
-	_, err = os.Stat(mountPoint)
-	if os.IsNotExist(err) {
-		glog.Infof("mount point not exist, create now")
-		err = os.Mkdir(mountPoint, os.ModeDir)
-		if err != nil {
-			goto failed
+	//todo: just find a node that could fit the pvc. Later we will find the best fit node
+	//var fitNode string
+	//var score int
+	var peSize int
+	var freePe int
+
+	for _, node := range nodes.Items {
+		if a, ok := node.Annotations[constants.AnnotationPeSize]; !ok {
+			continue
+		} else {
+			peSize, err = strconv.Atoi(a)
+			if err != nil {
+				return "", err
+			}
+		}
+		if a, ok := node.Annotations[constants.AnnotationFreePe]; ok {
+			continue
+		} else {
+			freePe, err = strconv.Atoi(a)
+			if err != nil {
+				return "", err
+			}
+		}
+		if int64(peSize * freePe * 1024) > size {
+			return node.Name, nil
 		}
 	}
 
-	//mount /dev/volume-group1/lv1 /lvm-mount/
-	err = utils.Run("mount", lvFullName, mountPoint)
-	if err != nil {
-		goto failed
-	}
-
-	return nil
-failed:
-	e := lv.Remove()
-	if e != nil {
-		glog.Error("lv remove failed", e)
-	}
-	return err
-}
-
-func (c *Controller) isMyPvc(pvc *v1.PersistentVolumeClaim) bool {
-	annotations := pvc.GetAnnotations()
-	nodeName, ok := annotations[AnnotationKey]
-	if !ok {
-		glog.Infof("pvc %s has no yummy annotation, wait for master to set", pvc.Name)
-		return false
-	}
-
-	// if pvc is not scheduled to this node, agent will just ignore it.
-	if nodeName != c.nodeName {
-		return false
-	}
-
-	return true
-}
-
-//func (c *Controller) handleDelete(pvc *v1.PersistentVolumeClaim) error {
-func (c *Controller) handleDelete(pvc string) error {
-	//pvc in fmt {namespace}/{pvc name}
-
-	//umount and rmdir
-	sp := strings.Split(pvc, "/")
-	lvName := sp[0] + "-" + sp[1]
-	glog.Infof("delete lv %s", lvName)
-
-	//requeue after
-
-	mountPoint := fmt.Sprintf("%s/%s", c.mountDir, lvName)
-	_, err := os.Stat(mountPoint)
-	if err == nil {
-		glog.Infof("mount point exist, umount and rm this dir")
-		err = utils.Run("umount", mountPoint)
-		if err != nil {
-			glog.Error("umount failed")
-			return err
-		}
-
-		//err = os.Remove(mountPoint)
-		//if err != nil {
-		//	return err
-		//}
-
-		lvm.DeleteLv(c.volumeGroup, lvName)
-	}
-
-	return nil
+	return "", fmt.Errorf("no node fit for this pvc")
 }
 
 // handle is the business logic of the controller. In this controller it simply prints
 // information about the pvc to stdout. In case an error happened, it has to simply return the error.
 // The retry logic should not be part of the business logic.
-func (c *Controller) handle(message Message) error {
+func (c *PvcController) handle(message Message) error {
 	key := message.key
 	obj, exists, err := c.indexer.GetByKey(key)
 	if err != nil {
@@ -216,9 +147,6 @@ func (c *Controller) handle(message Message) error {
 	if !exists {
 		// Below we will warm up our cache with a Pvc, so that we will see a delete for one pvc
 		glog.Infof("Pvc %s does not exist anymore\n", key)
-		if message.messageType == MessageDelete {
-			err = c.handleDelete(key)
-		}
 	} else {
 		// Note that you also have to check the uid if you have a local controlled resource, which
 		// is dependent on the actual instance, to detect that a Pvc was recreated with the same name
@@ -231,10 +159,9 @@ func (c *Controller) handle(message Message) error {
 			err = c.handleAddAndUpdate(pvc)
 		case MessageUpdate:
 			glog.Infof("PVC Update, %v", pvc)
-			err = c.handleAddAndUpdate(pvc)
+			//err = c.handleAddAndUpdate(pvc)
 		case MessageDelete:
 			glog.Infof("PVC Delete, %v", pvc)
-			//err = c.handleDelete(pvc)
 		default:
 			glog.Error("Invalid Message Type")
 		}
@@ -243,7 +170,7 @@ func (c *Controller) handle(message Message) error {
 }
 
 // handleErr checks if an error happened and makes sure we will retry later.
-func (c *Controller) handleErr(err error, message interface{}) {
+func (c *PvcController) handleErr(err error, message interface{}) {
 	if err == nil {
 		// Forget about the #AddRateLimited history of the message on every successful synchronization.
 		// This ensures that future processing of updates for this message is not delayed because of
@@ -268,7 +195,7 @@ func (c *Controller) handleErr(err error, message interface{}) {
 	glog.Infof("Dropping pvc %q out of the queue: %v", message, err)
 }
 
-func (c *Controller) Run(threadiness int, stopCh chan struct{}) {
+func (c *PvcController) Run(threadiness int, stopCh chan struct{}) {
 	defer runtime.HandleCrash()
 
 	// Let the workers stop when we are done
@@ -291,12 +218,12 @@ func (c *Controller) Run(threadiness int, stopCh chan struct{}) {
 	glog.Info("Stopping Pvc controller")
 }
 
-func (c *Controller) runWorker() {
+func (c *PvcController) runWorker() {
 	for c.processNextItem() {
 	}
 }
 
-func StartController(clientset *kubernetes.Clientset, nodeName, volumeGroup, mountDir string) {
+func StartPvcController(clientset *kubernetes.Clientset) {
 	// create the pvc watcher
 	pvcListWatcher := cache.NewListWatchFromClient(clientset.CoreV1().RESTClient(),
 		"persistentvolumeclaims", v1.NamespaceAll, fields.Everything())
@@ -331,7 +258,7 @@ func StartController(clientset *kubernetes.Clientset, nodeName, volumeGroup, mou
 		},
 	}, cache.Indexers{})
 
-	controller := NewController(queue, indexer, informer, nodeName, volumeGroup, mountDir)
+	controller := NewController(queue, indexer, informer, clientset)
 
 	// Now let's start the controller
 	stop := make(chan struct{})

@@ -4,7 +4,7 @@
 #sudo apt install liblvm2-dev
 #go get "github.com/nak3/go-lvm"
 
-pushd agent
+pushd cmd/agent
 CGO_ENABLED=1 GOPATH=/Users/hubaotao/Code/GoGo/ GOOS=linux GOARCH=amd64 go build agent.go
 popd
 

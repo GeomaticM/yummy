@@ -5,9 +5,13 @@ import "C"
 import (
 	"flag"
 	"github.com/golang/glog"
-	"github.com/silenceshell/yummy/pkg/common"
-	"github.com/silenceshell/yummy/pkg/controller"
-	"github.com/silenceshell/yummy/pkg/lvm"
+	"github.com/silenceshell/yummy/pkg/utils"
+
+	//"github.com/prometheus/client_golang/prometheus"
+	//"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/silenceshell/yummy/pkg/agent/common"
+	"github.com/silenceshell/yummy/pkg/agent/controller"
+	"github.com/silenceshell/yummy/pkg/agent/lvm"
 	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -52,7 +56,7 @@ func main() {
 		namespace = "default"
 	}
 
-	client := common.SetupClient()
+	client := utils.SetupClient()
 	node := getNode(client, nodeName)
 
 	glog.Info("node name is ", node.Name)
@@ -62,11 +66,34 @@ func main() {
 	if err != nil || isAvailable != true {
 		panic(err)
 	}
+
+	// todo:Get vg info and set node annotation such as:
+	// yummy.vg.size=128.00 GiB
+	// yummy.pe.size=4.00 MiB
+	// yummy.alloc.pe=2730 / 10.66 GiB
+	// yummy.free.pe=30037 / 117.33 GiB
+	// this annotation will be updated every time when pvc is created
+
+
 	mountDir := yummyAgentConfig.AgentConfigMap["agentConfigMap"].MountDir
 	stat, err := os.Stat(mountDir)
 	if os.IsNotExist(err) || !stat.IsDir() {
 		panic("mount dir not exist or not dir")
 	}
+
+	//glog.Infof("Starting metrics server at %s\n", optListenAddress)
+	//prometheus.MustRegister([]prometheus.Collector{
+	//	metrics.PersistentVolumeDiscoveryTotal,
+	//	metrics.PersistentVolumeDiscoveryDurationSeconds,
+	//	metrics.PersistentVolumeDeleteTotal,
+	//	metrics.PersistentVolumeDeleteDurationSeconds,
+	//	metrics.PersistentVolumeDeleteFailedTotal,
+	//	metrics.APIServerRequestsTotal,
+	//	metrics.APIServerRequestsFailedTotal,
+	//	metrics.APIServerRequestsDurationSeconds,
+	//	collectors.NewProcTableCollector(procTable),
+	//}...)
+	//http.Handle(optMetricsPath, promhttp.Handler())
 
 	controller.StartController(client, nodeName, vg, mountDir)
 }
