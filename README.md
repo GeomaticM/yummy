@@ -4,6 +4,10 @@ Yummy is a dynamic local volume provisioner based on lvm. It creates lvm accordi
 
 [Demo](https://www.youtube.com/watch?v=DB3u1PeOL8s)
 
+## Arch
+
+![arch](img/arch.png)
+
 ## build
 
 ### scheduler

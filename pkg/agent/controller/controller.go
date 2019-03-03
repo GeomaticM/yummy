@@ -248,13 +248,13 @@ func (c *Controller) handle(message Message) error {
 
 		switch message.messageType {
 		case MessageAdd:
-			glog.Infof("PVC Create, %v", pvc)
+			glog.Infof("PVC Create, %s", pvc.Name)
 			err = c.handleAddAndUpdate(pvc)
 		case MessageUpdate:
-			glog.Infof("PVC Update, %v", pvc)
+			glog.Infof("PVC Update, %s", pvc.Name)
 			err = c.handleAddAndUpdate(pvc)
 		case MessageDelete:
-			glog.Infof("PVC Delete, %v", pvc)
+			glog.Infof("PVC Delete, %s", pvc.Name)
 			//err = c.handleDelete(pvc)
 		default:
 			glog.Error("Invalid Message Type")
